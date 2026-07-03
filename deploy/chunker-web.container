@@ -21,6 +21,7 @@ Volume=chunker-web-conversions:/app/conversions:Z
 Environment=CHUNKER_OUTPUT_FORMAT=BEDROCK_R26_20
 Environment=CLEANUP_SUCCESSFUL_JOBS=true
 Environment=FAILED_JOB_RETENTION_SECONDS=86400
+Environment=ASYNC_JOB_RETENTION_SECONDS=3600
 Label=io.containers.autoupdate=registry
 
 [Service]

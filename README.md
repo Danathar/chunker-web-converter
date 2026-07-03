@@ -124,10 +124,11 @@ Environment variables:
 - `CHUNKER_TIMEOUT_SECONDS` default `1200`
 - `CLEANUP_SUCCESSFUL_JOBS` default `true`; deletes a successful job directory after the `.mcworld` download is sent
 - `FAILED_JOB_RETENTION_SECONDS` default `86400`; keeps failed/debug job directories for 24 hours before pruning. Set to `0` to remove them on the next request/startup, or `-1` to disable failed-job pruning.
+- `ASYNC_JOB_RETENTION_SECONDS` default `3600`; keeps completed-but-not-yet-downloaded async jobs for up to 1 hour before pruning.
 
 ## Disk cleanup
 
-Successful conversions are removed from `/app/conversions` immediately after the download response is sent. Failed conversions are retained briefly for troubleshooting and pruned by `FAILED_JOB_RETENTION_SECONDS`.
+Successful conversions are removed from `/app/conversions` immediately after the download response is sent. Completed async jobs that were never downloaded are pruned by `ASYNC_JOB_RETENTION_SECONDS`. Failed conversions are retained briefly for troubleshooting and pruned by `FAILED_JOB_RETENTION_SECONDS`.
 
 If you do not want any conversion files to survive container restarts, do not bind-mount `/app/conversions` to host storage.
 

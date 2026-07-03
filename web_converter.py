@@ -12,11 +12,13 @@ Prototype goals:
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 import shutil
 import signal
 import subprocess
+import threading
 import sys
 import time
 import uuid
@@ -35,6 +37,10 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(512 * 1024 * 1024)
 CHUNKER_TIMEOUT_SECONDS = int(os.environ.get("CHUNKER_TIMEOUT_SECONDS", str(20 * 60)))
 CLEANUP_SUCCESSFUL_JOBS = os.environ.get("CLEANUP_SUCCESSFUL_JOBS", "true").lower() not in {"0", "false", "no"}
 FAILED_JOB_RETENTION_SECONDS = int(os.environ.get("FAILED_JOB_RETENTION_SECONDS", str(24 * 60 * 60)))
+ASYNC_JOB_RETENTION_SECONDS = int(os.environ.get("ASYNC_JOB_RETENTION_SECONDS", str(60 * 60)))
+
+JOBS: dict[str, dict[str, object]] = {}
+JOBS_LOCK = threading.Lock()
 
 FORMATS = [
     "BEDROCK_R26_20",
@@ -142,7 +148,119 @@ def remove_job_dir(path: Path | None) -> None:
         pass
 
 
-def convert_world(upload_name: str, upload_bytes: bytes, output_format: str) -> tuple[Path, str, str]:
+def update_async_job(job_id: str, **updates: object) -> None:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def public_job(job: dict[str, object]) -> dict[str, object]:
+    result = {
+        "id": job["id"],
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "message": job.get("message", ""),
+        "filename": job.get("filename", ""),
+    }
+    if job.get("status") == "complete":
+        result["download_url"] = f"/jobs/{job['id']}/download"
+        result["download_name"] = job.get("mcworld_name", "converted.mcworld")
+    if job.get("status") == "error":
+        result["error"] = job.get("error", "Conversion failed")
+    return result
+
+
+def cleanup_async_jobs() -> None:
+    if ASYNC_JOB_RETENTION_SECONDS < 0:
+        return
+    cutoff = time.time() - ASYNC_JOB_RETENTION_SECONDS
+    remove_ids: list[str] = []
+    remove_paths: list[Path] = []
+    with JOBS_LOCK:
+        for job_id, job in JOBS.items():
+            if job.get("status") not in {"complete", "error"}:
+                continue
+            if float(job.get("updated_at", 0)) >= cutoff:
+                continue
+            path_value = job.get("mcworld_path")
+            if isinstance(path_value, str):
+                remove_paths.append(Path(path_value))
+            remove_ids.append(job_id)
+        for job_id in remove_ids:
+            JOBS.pop(job_id, None)
+    for path in remove_paths:
+        remove_job_dir(path)
+
+
+def run_chunker(cmd: list[str], job_dir: Path, progress_cb: object | None = None) -> str:
+    """Run Chunker and optionally report progress percentages from its output."""
+    if progress_cb is None:
+        completed = subprocess.run(
+            cmd,
+            cwd=BASE_DIR,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=CHUNKER_TIMEOUT_SECONDS,
+            check=False,
+        )
+        log = completed.stdout or ""
+        (job_dir / "chunker.log").write_text(log)
+        if completed.returncode != 0:
+            raise RuntimeError(f"Chunker failed with exit code {completed.returncode}.\n\n{log[-4000:]}")
+        return log
+
+    lines: list[str] = []
+    proc = subprocess.Popen(
+        cmd,
+        cwd=BASE_DIR,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+
+    def read_output() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.append(line)
+            stripped = line.strip()
+            if stripped:
+                match = list(re.finditer(r"(\d+(?:\.\d+)?)%", stripped))
+                if match:
+                    pct = min(99.0, float(match[-1].group(1)))
+                    progress_cb(pct, stripped)
+                elif "Compacting world" in stripped:
+                    progress_cb(90.0, stripped)
+                elif "Finished compacting" in stripped:
+                    progress_cb(96.0, stripped)
+                elif "Conversion complete" in stripped:
+                    progress_cb(100.0, stripped)
+                elif stripped.startswith("Converting from"):
+                    progress_cb(1.0, stripped)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    try:
+        returncode = proc.wait(timeout=CHUNKER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        reader.join(timeout=5)
+        log = "".join(lines)
+        (job_dir / "chunker.log").write_text(log)
+        raise RuntimeError(f"Chunker timed out after {CHUNKER_TIMEOUT_SECONDS} seconds.\n\n{log[-4000:]}") from exc
+    reader.join(timeout=5)
+    log = "".join(lines)
+    (job_dir / "chunker.log").write_text(log)
+    if returncode != 0:
+        raise RuntimeError(f"Chunker failed with exit code {returncode}.\n\n{log[-4000:]}")
+    return log
+
+
+def convert_world(upload_name: str, upload_bytes: bytes, output_format: str, progress_cb: object | None = None) -> tuple[Path, str, str]:
     if not upload_name.lower().endswith(".zip"):
         raise ValueError("Please upload a .zip file containing a Java world.")
     if output_format not in FORMATS:
@@ -169,24 +287,50 @@ def convert_world(upload_name: str, upload_bytes: bytes, output_format: str) -> 
     world_name = safe_name(world_dir.name, Path(upload_name).stem or "world")
 
     cmd = chunker_command() + ["-i", str(world_dir), "-f", output_format, "-o", str(output_dir)]
-    completed = subprocess.run(
-        cmd,
-        cwd=BASE_DIR,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=CHUNKER_TIMEOUT_SECONDS,
-        check=False,
-    )
-    log = completed.stdout or ""
-    (job_dir / "chunker.log").write_text(log)
-    if completed.returncode != 0:
-        raise RuntimeError(f"Chunker failed with exit code {completed.returncode}.\n\n{log[-4000:]}")
+    log = run_chunker(cmd, job_dir, progress_cb)
 
     mcworld_name = f"{world_name} Bedrock.mcworld"
     mcworld_path = job_dir / mcworld_name
     zip_dir_to_mcworld(output_dir, mcworld_path)
     return mcworld_path, mcworld_name, log
+
+
+def start_async_conversion(upload_name: str, upload_bytes: bytes, output_format: str) -> str:
+    cleanup_old_jobs()
+    cleanup_async_jobs()
+    job_id = uuid.uuid4().hex
+    now = time.time()
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "progress": 0.0,
+            "message": "Queued",
+            "filename": safe_name(upload_name, "world.zip"),
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def worker() -> None:
+        def progress_cb(progress: float, message: str) -> None:
+            update_async_job(job_id, progress=round(progress, 2), message=message)
+
+        try:
+            update_async_job(job_id, status="running", progress=0.0, message="Preparing upload")
+            mcworld_path, mcworld_name, _log = convert_world(upload_name, upload_bytes, output_format, progress_cb)
+            update_async_job(
+                job_id,
+                status="complete",
+                progress=100.0,
+                message="Conversion complete. Click the download link to save your .mcworld.",
+                mcworld_path=str(mcworld_path),
+                mcworld_name=mcworld_name,
+            )
+        except Exception as exc:
+            update_async_job(job_id, status="error", progress=100.0, message="Conversion failed", error=str(exc))
+
+    threading.Thread(target=worker, daemon=True).start()
+    return job_id
 
 
 class ConverterHandler(BaseHTTPRequestHandler):
@@ -196,16 +340,24 @@ class ConverterHandler(BaseHTTPRequestHandler):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        cleanup_async_jobs()
         path = urlparse(self.path).path
         if path == "/" or path == "/index.html":
             self.send_html(HTTPStatus.OK, page())
         elif path == "/healthz":
             self.send_text(HTTPStatus.OK, "ok\n")
+        elif path.startswith("/jobs/") and path.endswith("/download"):
+            self.handle_job_download(path)
+        elif path.startswith("/jobs/"):
+            self.handle_job_status(path)
         else:
             self.send_html(HTTPStatus.NOT_FOUND, page("Not found"))
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         path = urlparse(self.path).path
+        if path == "/jobs":
+            self.handle_job_create()
+            return
         if path != "/convert":
             self.send_html(HTTPStatus.NOT_FOUND, page("Not found"))
             return
@@ -243,6 +395,94 @@ class ConverterHandler(BaseHTTPRequestHandler):
         finally:
             if CLEANUP_SUCCESSFUL_JOBS:
                 remove_job_dir(mcworld_path)
+
+    def handle_job_create(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Missing or invalid Content-Length."})
+            return
+
+        if content_length <= 0:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": "No upload received."})
+            return
+        if content_length > MAX_UPLOAD_BYTES:
+            mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+            self.send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": f"Upload is too large. Limit is {mb} MB."})
+            return
+
+        body = self.rfile.read(content_length)
+        try:
+            fields = parse_multipart(self.headers.get("Content-Type", ""), body)
+            file_info = fields.get("world")
+            if not isinstance(file_info, UploadedFile):
+                raise ValueError("Choose a zipped Java world file before converting.")
+            output_format = str(fields.get("format") or DEFAULT_OUTPUT_FORMAT)
+            if output_format not in FORMATS:
+                raise ValueError(f"Unsupported output format: {output_format}")
+            job_id = start_async_conversion(file_info.filename, file_info.content, output_format)
+            with JOBS_LOCK:
+                job = dict(JOBS[job_id])
+            self.send_json(HTTPStatus.ACCEPTED, public_job(job))
+        except Exception as exc:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def handle_job_status(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 2:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            return
+        job_id = parts[1]
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job and job.get("status") == "complete":
+                path_value = job.get("mcworld_path")
+                if not isinstance(path_value, str) or not Path(path_value).exists():
+                    JOBS.pop(job_id, None)
+                    job = None
+            payload = public_job(dict(job)) if job else None
+        if payload is None:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "Job not found or already cleaned up."})
+            return
+        self.send_json(HTTPStatus.OK, payload)
+
+    def handle_job_download(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 3:
+            self.send_html(HTTPStatus.NOT_FOUND, page("Not found"))
+            return
+        job_id = parts[1]
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job:
+                self.send_html(HTTPStatus.NOT_FOUND, page("Job not found or already cleaned up.", is_error=True))
+                return
+            if job.get("status") != "complete":
+                self.send_html(HTTPStatus.BAD_REQUEST, page("That conversion is not complete yet.", is_error=True))
+                return
+            path_value = job.get("mcworld_path")
+            mcworld_name = str(job.get("mcworld_name") or "converted.mcworld")
+
+        if not isinstance(path_value, str):
+            self.send_html(HTTPStatus.NOT_FOUND, page("Converted file is missing.", is_error=True))
+            return
+        mcworld_path = Path(path_value)
+        try:
+            self.send_download(mcworld_path, mcworld_name)
+        finally:
+            if CLEANUP_SUCCESSFUL_JOBS:
+                remove_job_dir(mcworld_path)
+                with JOBS_LOCK:
+                    JOBS.pop(job_id, None)
+
+    def send_json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def send_html(self, status: HTTPStatus, body: str) -> None:
         data = body.encode("utf-8")
@@ -322,14 +562,19 @@ def page(message: str = "", is_error: bool = False) -> str:
     :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
     body {{ max-width: 760px; margin: 3rem auto; padding: 0 1rem; line-height: 1.45; }}
     h1 {{ margin-bottom: .25rem; }}
-    form {{ margin-top: 1.5rem; padding: 1.25rem; border: 1px solid #8885; border-radius: 14px; }}
+    form, #progress-panel {{ margin-top: 1.5rem; padding: 1.25rem; border: 1px solid #8885; border-radius: 14px; }}
     label {{ display: block; font-weight: 700; margin-top: 1rem; }}
     input, select, button {{ font: inherit; margin-top: .35rem; }}
     input[type=file], select {{ width: 100%; box-sizing: border-box; }}
     button {{ padding: .7rem 1rem; border: 0; border-radius: 10px; cursor: pointer; font-weight: 700; }}
+    button:disabled {{ cursor: wait; opacity: .65; }}
+    progress {{ width: 100%; height: 1.4rem; margin-top: .75rem; }}
     .hint {{ color: #777; }}
     .error {{ margin-top: 1rem; border-left: 4px solid #c00; padding: .75rem; background: #c002; }}
     .notice {{ margin-top: 1rem; border-left: 4px solid #06c; padding: .75rem; background: #06c2; }}
+    .hidden {{ display: none; }}
+    .status-line {{ font-weight: 700; margin: .5rem 0 0; }}
+    .small {{ font-size: .92rem; }}
     pre {{ white-space: pre-wrap; margin: 0; }}
   </style>
 </head>
@@ -337,16 +582,115 @@ def page(message: str = "", is_error: bool = False) -> str:
   <h1>Minecraft Java → Bedrock Converter</h1>
   <p class="hint">Upload a zipped Java world. The server converts it with Chunker and downloads a <code>.mcworld</code> file.</p>
   {banner}
-  <form method="post" action="/convert" enctype="multipart/form-data">
+  <form id="convert-form" method="post" action="/convert" enctype="multipart/form-data">
     <label for="world">Zipped Java world</label>
     <input id="world" name="world" type="file" accept=".zip,application/zip" required>
 
     <label for="format">Bedrock output format</label>
     <select id="format" name="format">{options}</select>
 
-    <p class="hint">Leave the default unless you need an older Bedrock version. Conversion may take a minute for large maps.</p>
-    <button type="submit">Convert to .mcworld</button>
+    <p class="hint">Leave the default unless you need an older Bedrock version. Large maps may take a while; keep this page open.</p>
+    <button id="convert-button" type="submit">Convert to .mcworld</button>
   </form>
+
+  <section id="progress-panel" class="hidden" aria-live="polite">
+    <strong id="progress-title">Starting conversion…</strong>
+    <progress id="progress-bar" max="100"></progress>
+    <p id="progress-percent" class="status-line">Preparing…</p>
+    <p id="progress-message" class="hint small"></p>
+    <p id="download-line" class="hidden"><a id="download-link" href="#">Download converted world</a></p>
+  </section>
+
+  <script>
+    const form = document.getElementById('convert-form');
+    const button = document.getElementById('convert-button');
+    const panel = document.getElementById('progress-panel');
+    const title = document.getElementById('progress-title');
+    const bar = document.getElementById('progress-bar');
+    const percent = document.getElementById('progress-percent');
+    const message = document.getElementById('progress-message');
+    const downloadLine = document.getElementById('download-line');
+    const downloadLink = document.getElementById('download-link');
+    let pollTimer = null;
+
+    function setProgress(value, msg) {{
+      if (typeof value === 'number' && !Number.isNaN(value)) {{
+        bar.value = Math.max(0, Math.min(100, value));
+        percent.textContent = `${{Math.round(bar.value)}}%`;
+      }} else {{
+        bar.removeAttribute('value');
+        percent.textContent = 'Working…';
+      }}
+      if (msg) message.textContent = msg;
+    }}
+
+    async function pollJob(jobId) {{
+      const response = await fetch(`/jobs/${{jobId}}`, {{ cache: 'no-store' }});
+      if (!response.ok) throw new Error(`Unable to get job status (${{response.status}})`);
+      const job = await response.json();
+      title.textContent = job.status === 'complete' ? 'Conversion complete' :
+                          job.status === 'error' ? 'Conversion failed' :
+                          'Converting world…';
+      setProgress(Number(job.progress), job.message || '');
+
+      if (job.status === 'complete') {{
+        clearInterval(pollTimer);
+        pollTimer = null;
+        button.disabled = false;
+        button.textContent = 'Convert another map';
+        downloadLink.href = job.download_url;
+        downloadLink.download = job.download_name || 'converted.mcworld';
+        downloadLine.classList.remove('hidden');
+        message.textContent = 'Your converted .mcworld is ready. Click the download link below.';
+      }} else if (job.status === 'error') {{
+        clearInterval(pollTimer);
+        pollTimer = null;
+        button.disabled = false;
+        button.textContent = 'Try again';
+        title.textContent = 'Conversion failed';
+        message.textContent = job.error || job.message || 'Conversion failed.';
+        panel.classList.add('error');
+      }}
+    }}
+
+    form.addEventListener('submit', async (event) => {{
+      event.preventDefault();
+      clearInterval(pollTimer);
+      downloadLine.classList.add('hidden');
+      panel.classList.remove('hidden', 'error');
+      title.textContent = 'Uploading world…';
+      message.textContent = 'Uploading zip to the server. Conversion will start after upload completes.';
+      bar.removeAttribute('value');
+      percent.textContent = 'Uploading…';
+      button.disabled = true;
+      button.textContent = 'Converting…';
+
+      try {{
+        const response = await fetch('/jobs', {{ method: 'POST', body: new FormData(form) }});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Upload failed (${{response.status}})`);
+        title.textContent = 'Queued…';
+        setProgress(Number(payload.progress), payload.message || 'Queued');
+        pollTimer = setInterval(() => pollJob(payload.id).catch(showError), 1000);
+        await pollJob(payload.id);
+      }} catch (error) {{
+        showError(error);
+      }}
+    }});
+
+    function showError(error) {{
+      clearInterval(pollTimer);
+      pollTimer = null;
+      panel.classList.remove('hidden');
+      panel.classList.add('error');
+      title.textContent = 'Conversion failed';
+      bar.value = 100;
+      percent.textContent = 'Error';
+      message.textContent = error && error.message ? error.message : String(error);
+      button.disabled = false;
+      button.textContent = 'Try again';
+    }}
+  </script>
 </body>
 </html>"""
 

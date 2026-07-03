@@ -11,7 +11,8 @@ ENV PYTHONUNBUFFERED=1 \
     MAX_UPLOAD_BYTES=536870912 \
     CHUNKER_TIMEOUT_SECONDS=1200 \
     CLEANUP_SUCCESSFUL_JOBS=true \
-    FAILED_JOB_RETENTION_SECONDS=86400
+    FAILED_JOB_RETENTION_SECONDS=86400 \
+    ASYNC_JOB_RETENTION_SECONDS=3600
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl unzip \
