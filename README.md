@@ -1,5 +1,7 @@
 # Chunker Web Converter
 
+Note: This is a vibe coded AI utility I made for my kid because they kept asking me to convert minecraft java maps to bedrock. 
+
 A small web UI for converting zipped Minecraft Java worlds into Bedrock `.mcworld` files using [Chunker](https://github.com/HiveGamesOSS/Chunker).
 
 ## Local prototype
