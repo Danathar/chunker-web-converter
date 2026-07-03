@@ -14,7 +14,7 @@ After=network-online.target
 
 [Container]
 ContainerName=chunker-web
-Image=ghcr.io/YOUR_GITHUB_USER/YOUR_REPO:latest
+Image=ghcr.io/danathar/chunker-web-converter:latest
 AutoUpdate=registry
 PublishPort=8090:8080
 Volume=chunker-web-conversions:/app/conversions:Z

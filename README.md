@@ -44,26 +44,26 @@ http://<server-ip>:8090/
 The included workflow publishes to GitHub Container Registry:
 
 ```text
-ghcr.io/<github-user-or-org>/<repo>:latest
-ghcr.io/<github-user-or-org>/<repo>:chunker-<version>
+ghcr.io/danathar/chunker-web-converter:latest
+ghcr.io/danathar/chunker-web-converter:chunker-<version>
 ```
 
 Example run from GHCR:
 
 ```sh
-podman pull ghcr.io/<github-user-or-org>/<repo>:latest
+podman pull ghcr.io/danathar/chunker-web-converter:latest
 podman run -d \
   --name chunker-web \
   --restart unless-stopped \
   -p 8090:8080 \
   -v chunker-web-conversions:/app/conversions:Z \
-  ghcr.io/<github-user-or-org>/<repo>:latest
+  ghcr.io/danathar/chunker-web-converter:latest
 ```
 
 Update later:
 
 ```sh
-podman pull ghcr.io/<github-user-or-org>/<repo>:latest
+podman pull ghcr.io/danathar/chunker-web-converter:latest
 podman stop chunker-web
 podman rm chunker-web
 podman run -d \
@@ -71,7 +71,7 @@ podman run -d \
   --restart unless-stopped \
   -p 8090:8080 \
   -v chunker-web-conversions:/app/conversions:Z \
-  ghcr.io/<github-user-or-org>/<repo>:latest
+  ghcr.io/danathar/chunker-web-converter:latest
 ```
 
 
@@ -88,7 +88,7 @@ On your Podman server:
 ```sh
 mkdir -p ~/.config/containers/systemd
 cp deploy/chunker-web.container ~/.config/containers/systemd/chunker-web.container
-# edit Image=ghcr.io/<github-user-or-org>/<repo>:latest
+# edit Image=ghcr.io/danathar/chunker-web-converter:latest
 systemctl --user daemon-reload
 systemctl --user enable --now chunker-web.service
 ```
