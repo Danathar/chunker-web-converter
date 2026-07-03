@@ -9,7 +9,9 @@ ENV PYTHONUNBUFFERED=1 \
     CHUNKER_BIN=/opt/chunker-cli/bin/chunker-cli \
     CHUNKER_OUTPUT_FORMAT=BEDROCK_R26_20 \
     MAX_UPLOAD_BYTES=536870912 \
-    CHUNKER_TIMEOUT_SECONDS=1200
+    CHUNKER_TIMEOUT_SECONDS=1200 \
+    CLEANUP_SUCCESSFUL_JOBS=true \
+    FAILED_JOB_RETENTION_SECONDS=86400
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl unzip \

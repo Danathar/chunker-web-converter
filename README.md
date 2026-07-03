@@ -122,9 +122,16 @@ Environment variables:
 - `CHUNKER_OUTPUT_FORMAT` default `BEDROCK_R26_20`
 - `MAX_UPLOAD_BYTES` default `536870912` (512 MB)
 - `CHUNKER_TIMEOUT_SECONDS` default `1200`
+- `CLEANUP_SUCCESSFUL_JOBS` default `true`; deletes a successful job directory after the `.mcworld` download is sent
+- `FAILED_JOB_RETENTION_SECONDS` default `86400`; keeps failed/debug job directories for 24 hours before pruning. Set to `0` to remove them on the next request/startup, or `-1` to disable failed-job pruning.
+
+## Disk cleanup
+
+Successful conversions are removed from `/app/conversions` immediately after the download response is sent. Failed conversions are retained briefly for troubleshooting and pruned by `FAILED_JOB_RETENTION_SECONDS`.
+
+If you do not want any conversion files to survive container restarts, do not bind-mount `/app/conversions` to host storage.
 
 ## Notes
 
-- Uploaded maps and converted results are kept under `/app/conversions` for debugging.
 - The app rejects zip entries with absolute paths or `..` path traversal.
 - The current app is synchronous: one browser request waits while the conversion runs.

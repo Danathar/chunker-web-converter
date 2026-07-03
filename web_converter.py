@@ -18,7 +18,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 import zipfile
@@ -34,6 +33,8 @@ CONVERSIONS_DIR = BASE_DIR / "conversions"
 DEFAULT_OUTPUT_FORMAT = os.environ.get("CHUNKER_OUTPUT_FORMAT", "BEDROCK_R26_20")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(512 * 1024 * 1024)))
 CHUNKER_TIMEOUT_SECONDS = int(os.environ.get("CHUNKER_TIMEOUT_SECONDS", str(20 * 60)))
+CLEANUP_SUCCESSFUL_JOBS = os.environ.get("CLEANUP_SUCCESSFUL_JOBS", "true").lower() not in {"0", "false", "no"}
+FAILED_JOB_RETENTION_SECONDS = int(os.environ.get("FAILED_JOB_RETENTION_SECONDS", str(24 * 60 * 60)))
 
 FORMATS = [
     "BEDROCK_R26_20",
@@ -111,6 +112,34 @@ def zip_dir_to_mcworld(source_dir: Path, dest_file: Path) -> None:
         for path in sorted(source_dir.rglob("*")):
             if path.is_file():
                 zf.write(path, path.relative_to(source_dir).as_posix())
+
+
+def cleanup_old_jobs() -> None:
+    """Remove old conversion job directories left behind for failed-job debugging."""
+    if FAILED_JOB_RETENTION_SECONDS < 0 or not CONVERSIONS_DIR.exists():
+        return
+
+    cutoff = time.time() - FAILED_JOB_RETENTION_SECONDS
+    for job_dir in CONVERSIONS_DIR.iterdir():
+        if not job_dir.is_dir():
+            continue
+        try:
+            if job_dir.stat().st_mtime < cutoff:
+                shutil.rmtree(job_dir, ignore_errors=True)
+        except OSError:
+            # Best-effort cleanup only; never fail a conversion because pruning failed.
+            pass
+
+
+def remove_job_dir(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        job_dir = path if path.is_dir() else path.parent
+        if job_dir.is_relative_to(CONVERSIONS_DIR):
+            shutil.rmtree(job_dir, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def convert_world(upload_name: str, upload_bytes: bytes, output_format: str) -> tuple[Path, str, str]:
@@ -196,16 +225,24 @@ class ConverterHandler(BaseHTTPRequestHandler):
             return
 
         body = self.rfile.read(content_length)
+        mcworld_path: Path | None = None
         try:
+            cleanup_old_jobs()
             fields = parse_multipart(self.headers.get("Content-Type", ""), body)
             file_info = fields.get("world")
             if not isinstance(file_info, UploadedFile):
                 raise ValueError("Choose a zipped Java world file before converting.")
             output_format = str(fields.get("format") or DEFAULT_OUTPUT_FORMAT)
             mcworld_path, mcworld_name, log = convert_world(file_info.filename, file_info.content, output_format)
-            self.send_download(mcworld_path, mcworld_name)
         except Exception as exc:  # Prototype: return friendly diagnostics in browser.
             self.send_html(HTTPStatus.BAD_REQUEST, page(str(exc), is_error=True))
+            return
+
+        try:
+            self.send_download(mcworld_path, mcworld_name)
+        finally:
+            if CLEANUP_SUCCESSFUL_JOBS:
+                remove_job_dir(mcworld_path)
 
     def send_html(self, status: HTTPStatus, body: str) -> None:
         data = body.encode("utf-8")
@@ -318,6 +355,7 @@ def main() -> None:
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8080"))
     # Fail fast with a helpful error if Chunker is missing.
+    cleanup_old_jobs()
     cmd = chunker_command()
     print(f"Using Chunker: {' '.join(cmd)}")
     display_host = "localhost" if host in {"0.0.0.0", "::"} else host
