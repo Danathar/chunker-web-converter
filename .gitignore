@@ -1,0 +1,10 @@
+# Generated map conversion artifacts
+conversions/
+input/
+output/
+*.mcworld
+*.zip
+
+# Python
+__pycache__/
+*.pyc

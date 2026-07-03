@@ -1,0 +1,29 @@
+# Podman Quadlet example.
+# Copy to ~/.config/containers/systemd/chunker-web.container on your server,
+# replace the Image= value, then run:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now chunker-web.service
+#
+# If you use podman auto-update, the io.containers.autoupdate label lets the
+# service update when GHCR has a newer :latest image.
+
+[Unit]
+Description=Chunker Web Converter
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=chunker-web
+Image=ghcr.io/YOUR_GITHUB_USER/YOUR_REPO:latest
+AutoUpdate=registry
+PublishPort=8090:8080
+Volume=chunker-web-conversions:/app/conversions:Z
+Environment=CHUNKER_OUTPUT_FORMAT=BEDROCK_R26_20
+Label=io.containers.autoupdate=registry
+
+[Service]
+Restart=always
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

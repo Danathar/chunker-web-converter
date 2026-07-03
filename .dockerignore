@@ -1,0 +1,19 @@
+# Only the app source is needed in the image.
+*
+!web_converter.py
+!Containerfile
+!README.md
+!.github/
+
+# Never include map uploads/results or local tool downloads.
+*.zip
+*.mcworld
+conversions/
+input/
+output/
+tools/
+__pycache__/
+*.pyc
+web_converter.log
+web_converter.pid
+.git/
