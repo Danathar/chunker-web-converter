@@ -38,6 +38,9 @@ CHUNKER_TIMEOUT_SECONDS = int(os.environ.get("CHUNKER_TIMEOUT_SECONDS", str(20 *
 CLEANUP_SUCCESSFUL_JOBS = os.environ.get("CLEANUP_SUCCESSFUL_JOBS", "true").lower() not in {"0", "false", "no"}
 FAILED_JOB_RETENTION_SECONDS = int(os.environ.get("FAILED_JOB_RETENTION_SECONDS", str(24 * 60 * 60)))
 ASYNC_JOB_RETENTION_SECONDS = int(os.environ.get("ASYNC_JOB_RETENTION_SECONDS", str(60 * 60)))
+CHUNKER_VERSION_LABEL = os.environ.get("CHUNKER_VERSION", "unknown")
+CHUNKER_RELEASE_DATE = os.environ.get("CHUNKER_RELEASE_DATE", "unknown")
+IMAGE_BUILD_DATE = os.environ.get("IMAGE_BUILD_DATE", "unknown")
 
 JOBS: dict[str, dict[str, object]] = {}
 JOBS_LOCK = threading.Lock()
@@ -561,6 +564,8 @@ def page(message: str = "", is_error: bool = False) -> str:
   <style>
     :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
     body {{ max-width: 760px; margin: 3rem auto; padding: 0 1rem; line-height: 1.45; }}
+    .meta-badge {{ position: fixed; top: .75rem; right: .75rem; font-size: .82rem; color: #666; background: Canvas; border: 1px solid #8885; border-radius: 10px; padding: .45rem .6rem; box-shadow: 0 2px 10px #0001; }}
+    @media (max-width: 700px) {{ .meta-badge {{ position: static; margin-bottom: 1rem; display: inline-block; }} }}
     h1 {{ margin-bottom: .25rem; }}
     form, #progress-panel {{ margin-top: 1.5rem; padding: 1.25rem; border: 1px solid #8885; border-radius: 14px; }}
     label {{ display: block; font-weight: 700; margin-top: 1rem; }}
@@ -579,6 +584,7 @@ def page(message: str = "", is_error: bool = False) -> str:
   </style>
 </head>
 <body>
+  <div class="meta-badge">Chunker {html.escape(CHUNKER_VERSION_LABEL)}<br>Released {html.escape(CHUNKER_RELEASE_DATE)}<br>Image updated {html.escape(IMAGE_BUILD_DATE)}</div>
   <h1>Minecraft Java → Bedrock Converter</h1>
   <p class="hint">Upload a zipped Java world. The server converts it with Chunker and downloads a <code>.mcworld</code> file.</p>
   {banner}

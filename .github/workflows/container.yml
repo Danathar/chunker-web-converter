@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.latest.outputs.version }}
+      release_date: ${{ steps.latest.outputs.release_date }}
       image: ${{ steps.image.outputs.image }}
       tag_exists: ${{ steps.check.outputs.tag_exists }}
       should_build: ${{ steps.decision.outputs.should_build }}
@@ -34,13 +35,19 @@ jobs:
         id: latest
         run: |
           set -euo pipefail
-          version="$(curl -fsSL https://api.github.com/repos/HiveGamesOSS/Chunker/releases/latest | jq -r '.tag_name')"
+          release_json="$(curl -fsSL https://api.github.com/repos/HiveGamesOSS/Chunker/releases/latest)"
+          version="$(jq -r '.tag_name' <<<"$release_json")"
+          release_date="$(jq -r '.published_at | sub("T.*"; "")' <<<"$release_json")"
           if [ -z "$version" ] || [ "$version" = "null" ]; then
             echo "Could not determine latest Chunker version" >&2
             exit 1
           fi
+          if [ -z "$release_date" ] || [ "$release_date" = "null" ]; then
+            release_date="unknown"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Latest Chunker release: $version"
+          echo "release_date=$release_date" >> "$GITHUB_OUTPUT"
+          echo "Latest Chunker release: $version, published $release_date"
 
       - name: Compute image name
         id: image
@@ -99,6 +106,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image metadata
+        id: metadata
+        run: echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -108,6 +119,8 @@ jobs:
           push: true
           build-args: |
             CHUNKER_VERSION=${{ needs.discover.outputs.version }}
+            CHUNKER_RELEASE_DATE=${{ needs.discover.outputs.release_date }}
+            IMAGE_BUILD_DATE=${{ steps.metadata.outputs.build_date }}
           tags: |
             ${{ needs.discover.outputs.image }}:latest
             ${{ needs.discover.outputs.image }}:chunker-${{ needs.discover.outputs.version }}
@@ -117,3 +130,4 @@ jobs:
             org.opencontainers.image.description=Browser UI for converting zipped Minecraft Java worlds to Bedrock .mcworld files using Chunker
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=chunker-${{ needs.discover.outputs.version }}
+            org.opencontainers.image.created=${{ steps.metadata.outputs.build_date }}

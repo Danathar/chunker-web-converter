@@ -122,6 +122,9 @@ Environment variables:
 - `PORT` default `8080` in the container
 - `CHUNKER_BIN` default `/opt/chunker-cli/bin/chunker-cli` in the container
 - `CHUNKER_OUTPUT_FORMAT` default `BEDROCK_R26_20`
+- `CHUNKER_VERSION` set at image build time; shown in the page corner
+- `CHUNKER_RELEASE_DATE` set at image build time; shown in the page corner
+- `IMAGE_BUILD_DATE` set at image build time; shown in the page corner
 - `MAX_UPLOAD_BYTES` default `536870912` (512 MB)
 - `CHUNKER_TIMEOUT_SECONDS` default `1200`
 - `CLEANUP_SUCCESSFUL_JOBS` default `true`; deletes a successful job directory after the `.mcworld` download is sent
